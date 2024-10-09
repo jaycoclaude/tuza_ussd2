@@ -3,8 +3,9 @@ const mysql = require('mysql2/promise');
 const bodyParser = require('body-parser');
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.urlencoded({ extended: true }));
 
+// Database connection
 const dbConfig = {
   host: 'localhost',
   user: 'root',
@@ -12,40 +13,78 @@ const dbConfig = {
   database: 'tuzaussd_db'
 };
 
-let connection;
+// Function to get database connection
+async function getConnection() {
+  return await mysql.createConnection(dbConfig);
+}
 
-async function connectToDatabase() {
+// Function to get the current menu level
+async function getCurrentLevel(sessionId) {
+  const conn = await getConnection();
   try {
-    connection = await mysql.createConnection(dbConfig);
-    console.log('Connected to the database');
+    await conn.query(`CREATE TABLE IF NOT EXISTS sessions (
+      session_id VARCHAR(255) PRIMARY KEY,
+      level INT NOT NULL
+    )`);
+
+    const [rows] = await conn.query('SELECT level FROM sessions WHERE session_id = ?', [sessionId]);
+    return rows.length > 0 ? rows[0].level : 0;
   } catch (error) {
-    console.error('Database connection failed:', error);
-    process.exit(1);
+    throw error;
+  } finally {
+    await conn.end();
   }
 }
 
-connectToDatabase();
-
-async function getCurrentLevel(sessionId) {
-  const [rows] = await connection.execute('SELECT level FROM sessions WHERE session_id = ?', [sessionId]);
-  return rows.length > 0 ? rows[0].level : 0;
-}
-
+// Function to update the menu level
 async function updateLevel(sessionId, level) {
-  await connection.execute(
-    'INSERT INTO sessions (session_id, level) VALUES (?, ?) ON DUPLICATE KEY UPDATE level = ?',
-    [sessionId, level, level]
-  );
+  const conn = await getConnection();
+  try {
+    await conn.query('INSERT INTO sessions (session_id, level) VALUES (?, ?) ON DUPLICATE KEY UPDATE level = ?', [sessionId, level, level]);
+  } catch (error) {
+    throw error;
+  } finally {
+    await conn.end();
+  }
 }
 
-app.post('/ussd', async (req, res) => {
-  const { sessionId, msisdn: phoneNumber, UserInput: userInput } = req.body;
+// Ensure tables exist
+async function ensureTables() {
+  const conn = await getConnection();
+  try {
+    await conn.query(`CREATE TABLE IF NOT EXISTS users (
+      phone_number VARCHAR(20) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL
+    )`);
+
+    await conn.query(`CREATE TABLE IF NOT EXISTS appointments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_phone VARCHAR(20),
+      appointment_date DATE,
+      status VARCHAR(20) DEFAULT 'Scheduled',
+      FOREIGN KEY (user_phone) REFERENCES users(phone_number)
+    )`);
+  } catch (error) {
+    throw error;
+  } finally {
+    await conn.end();
+  }
+}
+
+ensureTables();
+
+app.post('/', async (req, res) => {
+  const sessionId = req.body.sessionId || '';
+  const phoneNumber = req.body.msisdn || '';
+  const userInput = decodeURIComponent(req.body.UserInput || '');
+  const serviceCode = req.body.serviceCode || '';
+  const networkCode = req.body.networkCode || '';
+
+  let level = await getCurrentLevel(sessionId);
   let response = '';
   let continueSession = 1;
 
   try {
-    let level = await getCurrentLevel(sessionId);
-
     if (userInput === '*662*800*100#' || level === 0) {
       response = 'Welcome to XYZ Cleaning Company\n' +
                  '1. Register\n' +
@@ -85,44 +124,76 @@ app.post('/ussd', async (req, res) => {
           break;
         case 2:
           // Register user
-          await connection.execute('INSERT INTO users (phone_number, name) VALUES (?, ?)', [phoneNumber, userInput]);
-          response = 'Registration successful. Thank you for choosing XYZ Cleaning Company!';
-          continueSession = 0;
+          const conn = await getConnection();
+          try {
+            await conn.query('INSERT INTO users (phone_number, name) VALUES (?, ?)', [phoneNumber, userInput]);
+            response = 'Registration successful. Thank you for choosing XYZ Cleaning Company!';
+            continueSession = 0;
+          } finally {
+            await conn.end();
+          }
           break;
         case 3:
           // Book appointment
-          const [result] = await connection.execute('INSERT INTO appointments (user_phone, appointment_date) VALUES (?, ?)', [phoneNumber, userInput]);
-          response = `Appointment booked successfully. Your appointment ID is: ${result.insertId}`;
+          if (/^\d{4}-\d{2}-\d{2}$/.test(userInput)) {
+            const conn = await getConnection();
+            try {
+              const [result] = await conn.query('INSERT INTO appointments (user_phone, appointment_date) VALUES (?, ?)', [phoneNumber, userInput]);
+              response = `Appointment booked successfully. Your appointment ID is: ${result.insertId}`;
+            } finally {
+              await conn.end();
+            }
+          } else {
+            response = 'Invalid date format. Please use YYYY-MM-DD.';
+          }
           continueSession = 0;
           break;
         case 4:
           // Cancel appointment
-          const [deleteResult] = await connection.execute('DELETE FROM appointments WHERE id = ? AND user_phone = ?', [userInput, phoneNumber]);
-          if (deleteResult.affectedRows > 0) {
-            response = 'Appointment cancelled successfully.';
+          if (!isNaN(userInput)) {
+            const conn = await getConnection();
+            try {
+              const [result] = await conn.query('DELETE FROM appointments WHERE id = ? AND user_phone = ?', [userInput, phoneNumber]);
+              response = result.affectedRows > 0 ? 'Appointment cancelled successfully.' : 'Appointment not found or already cancelled.';
+            } finally {
+              await conn.end();
+            }
           } else {
-            response = 'Appointment not found or already cancelled.';
+            response = 'Invalid appointment ID. Please enter a number.';
           }
           continueSession = 0;
           break;
         case 5:
           // Check appointment status
-          const [rows] = await connection.execute('SELECT appointment_date, status FROM appointments WHERE id = ? AND user_phone = ?', [userInput, phoneNumber]);
-          if (rows.length > 0) {
-            response = `Appointment Date: ${rows[0].appointment_date}\nStatus: ${rows[0].status}`;
+          if (!isNaN(userInput)) {
+            const conn = await getConnection();
+            try {
+              const [rows] = await conn.query('SELECT appointment_date, status FROM appointments WHERE id = ? AND user_phone = ?', [userInput, phoneNumber]);
+              if (rows.length > 0) {
+                response = `Appointment Date: ${rows[0].appointment_date}\nStatus: ${rows[0].status}`;
+              } else {
+                response = 'Appointment not found.';
+              }
+            } finally {
+              await conn.end();
+            }
           } else {
-            response = 'Appointment not found.';
+            response = 'Invalid appointment ID. Please enter a number.';
           }
           continueSession = 0;
           break;
       }
     }
-
-    res.json({ sessionId, message: response, ContinueSession: continueSession });
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    response = `Error processing request: ${error.message}`;
+    continueSession = 0;
   }
+
+  res.json({
+    sessionId: sessionId,
+    message: response,
+    ContinueSession: continueSession
+  });
 });
 
 const PORT = process.env.PORT || 3000;
