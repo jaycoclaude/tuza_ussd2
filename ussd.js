@@ -1,202 +1,237 @@
-const express = require('express');
-const mysql = require('mysql2/promise');
-const bodyParser = require('body-parser');
+import { NextRequest, NextResponse } from 'next/server';
+import prisma from '../db';
+import { MortalityStatusEnum, UserRoleEnum } from '@prisma/client';
+import passwordUtils from '@/utils/shared/passwordUtils';
 
-const app = express();
-app.use(bodyParser.urlencoded({ extended: true }));
+const COST_PER_DAY = 19000;
 
-// Database connection
-const dbConfig = {
-  host: 'localhost',
-  user: 'root',
-  password: 'password',
-  database: 'tuzaussd_db'
-};
-
-// Function to get database connection
-async function getConnection() {
-  return await mysql.createConnection(dbConfig);
-}
-
-// Function to get the current menu level
-async function getCurrentLevel(sessionId) {
-  const conn = await getConnection();
+export async function POST(req: NextRequest) {
   try {
-    await conn.query(`CREATE TABLE IF NOT EXISTS sessions (
-      session_id VARCHAR(255) PRIMARY KEY,
-      level INT NOT NULL
-    )`);
 
-    const [rows] = await conn.query('SELECT level FROM sessions WHERE session_id = ?', [sessionId]);
-    return rows.length > 0 ? rows[0].level : 0;
-  } catch (error) {
-    throw error;
-  } finally {
-    await conn.end();
-  }
-}
 
-// Function to update the menu level
-async function updateLevel(sessionId, level) {
-  const conn = await getConnection();
-  try {
-    await conn.query('INSERT INTO sessions (session_id, level) VALUES (?, ?) ON DUPLICATE KEY UPDATE level = ?', [sessionId, level, level]);
-  } catch (error) {
-    throw error;
-  } finally {
-    await conn.end();
-  }
-}
+    const formData = await req.formData();
+    // Check if formData is empty
+    if (formData.entries().next().done) {
+      return new NextResponse("END No data submitted");
+    }
+    const sessionId = formData.get('sessionId') as string;
+    const serviceCode = formData.get('serviceCode') as string;
+    const phoneNumber = formData.get('phoneNumber') as string;
+    const text = formData.get('text') as string;
 
-// Ensure tables exist
-async function ensureTables() {
-  const conn = await getConnection();
-  try {
-    await conn.query(`CREATE TABLE IF NOT EXISTS users (
-      phone_number VARCHAR(20) PRIMARY KEY,
-      name VARCHAR(255) NOT NULL
-    )`);
+    // Check for required fields
+    if (!phoneNumber) {
+      return new NextResponse("END Phone number is missing");
+    }
 
-    await conn.query(`CREATE TABLE IF NOT EXISTS appointments (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      user_phone VARCHAR(20),
-      appointment_date DATE,
-      status VARCHAR(20) DEFAULT 'Scheduled',
-      FOREIGN KEY (user_phone) REFERENCES users(phone_number)
-    )`);
-  } catch (error) {
-    throw error;
-  } finally {
-    await conn.end();
-  }
-}
+    const safeText = text || '';
 
-ensureTables();
+    let response = '';
+    const textArray = safeText.split('*');
+    const level = textArray.length;
 
-app.post('/', async (req, res) => {
-  const sessionId = req.body.sessionId || '';
-  const phoneNumber = req.body.msisdn || '';
-  const userInput = decodeURIComponent(req.body.UserInput || '');
-  const serviceCode = req.body.serviceCode || '';
-  const networkCode = req.body.networkCode || '';
+    const cleanPhoneNumber = phoneNumber.slice(-9);
 
-  let level = await getCurrentLevel(sessionId);
-  let response = '';
-  let continueSession = 1;
+    // Check if the user exists by phone number
+    const users = await prisma.user.findMany({
+      include: { relative: true },
+    });
 
-  try {
-    if (userInput === '**384*5158#' || level === 0) {
-      response = 'Welcome to XYZ Cleaning Company\n' +
-                 '1. Register\n' +
-                 '2. Book Appointment\n' +
-                 '3. Cancel Appointment\n' +
-                 '4. Check Appointment Status\n' +
-                 '5. Exit\n';
-      await updateLevel(sessionId, 1);
-    } else {
+    let user = users.find(u => u.relative?.tel.slice(-9) === cleanPhoneNumber) || null;
+
+
+
+    if (!user) {
       switch (level) {
         case 1:
-          switch (userInput) {
-            case '1':
-              response = 'Enter your name:';
-              await updateLevel(sessionId, 2);
-              break;
-            case '2':
-              response = 'Enter preferred date (YYYY-MM-DD):';
-              await updateLevel(sessionId, 3);
-              break;
-            case '3':
-              response = 'Enter appointment ID to cancel:';
-              await updateLevel(sessionId, 4);
-              break;
-            case '4':
-              response = 'Enter appointment ID to check status:';
-              await updateLevel(sessionId, 5);
-              break;
-            case '5':
-              response = 'Thank you for using our service. Goodbye!';
-              continueSession = 0;
-              break;
-            default:
-              response = 'Invalid input. Please try again.';
-              break;
-          }
+          response = 'CON Welcome to Morgue Management System. You are not registered yet. Would you like to register?\n';
+          response += '1. Yes\n';
+          response += '2. No';
           break;
         case 2:
-          // Register user
-          const conn = await getConnection();
-          try {
-            await conn.query('INSERT INTO users (phone_number, name) VALUES (?, ?)', [phoneNumber, userInput]);
-            response = 'Registration successful. Thank you for choosing XYZ Cleaning Company!';
-            continueSession = 0;
-          } finally {
-            await conn.end();
+          if (textArray[1] === '1') {
+            response = 'CON Please enter your full name:';
+          } else {
+            response = 'END Thank you for using our service. Goodbye!';
           }
           break;
         case 3:
-          // Book appointment
-          if (/^\d{4}-\d{2}-\d{2}$/.test(userInput)) {
-            const conn = await getConnection();
-            try {
-              const [result] = await conn.query('INSERT INTO appointments (user_phone, appointment_date) VALUES (?, ?)', [phoneNumber, userInput]);
-              response = `Appointment booked successfully. Your appointment ID is: ${result.insertId}`;
-            } finally {
-              await conn.end();
-            }
-          } else {
-            response = 'Invalid date format. Please use YYYY-MM-DD.';
-          }
-          continueSession = 0;
+          response = 'CON Please enter your email address:';
           break;
         case 4:
-          // Cancel appointment
-          if (!isNaN(userInput)) {
-            const conn = await getConnection();
-            try {
-              const [result] = await conn.query('DELETE FROM appointments WHERE id = ? AND user_phone = ?', [userInput, phoneNumber]);
-              response = result.affectedRows > 0 ? 'Appointment cancelled successfully.' : 'Appointment not found or already cancelled.';
-            } finally {
-              await conn.end();
-            }
-          } else {
-            response = 'Invalid appointment ID. Please enter a number.';
-          }
-          continueSession = 0;
+          response = 'CON Please enter your National ID number:';
           break;
         case 5:
-          // Check appointment status
-          if (!isNaN(userInput)) {
-            const conn = await getConnection();
-            try {
-              const [rows] = await conn.query('SELECT appointment_date, status FROM appointments WHERE id = ? AND user_phone = ?', [userInput, phoneNumber]);
-              if (rows.length > 0) {
-                response = `Appointment Date: ${rows[0].appointment_date}\nStatus: ${rows[0].status}`;
-              } else {
-                response = 'Appointment not found.';
-              }
-            } finally {
-              await conn.end();
-            }
-          } else {
-            response = 'Invalid appointment ID. Please enter a number.';
-          }
-          continueSession = 0;
+          response = 'CON Please enter your location:';
           break;
+        case 6:
+          // Create the user
+          const [names, email, nid, location] = textArray.slice(2);
+          const password = Math.random().toString(36).slice(-8); // Generate a random password
+
+          try {
+            user = await prisma.user.create({
+              data: {
+                names,
+                email,
+                role: UserRoleEnum.RELATIVE,
+                location,
+                password: await passwordUtils.encryptPassword(password),
+                relative: {
+                  create: {
+                    tel: phoneNumber,
+                    nid,
+                  },
+                }
+              },
+              include: { relative: true },
+            });
+
+            response = `END Registration successful! Your temporary password is: ${password}\n`;
+            response += 'Please change your password after logging in at https://morgue-management-system.vercel.app/';
+          } catch (error) {
+            response = 'END Registration failed. Please try again later or register on our website.';
+          }
+          break;
+        default:
+          response = 'END Invalid input. Please try again.';
+      }
+    } else {
+      switch (level) {
+        case 1:
+          response = 'CON Welcome to Morgue Management System. What would you like to do?\n';
+          response += '1. Start a new claim\n';
+          response += '2. View claim history';
+          break;
+
+        case 2:
+          if (textArray[1] === '1') {
+            response = 'CON Choose hospital where your deceased one is at:\n';
+            const hospitals = await prisma.hospital.findMany({ include: { user: true } });
+            hospitals.forEach((h, idx) => {
+              response += `${idx + 1}. ${h.user.names} - ${h.user.location}\n`;
+            })
+          } else if (textArray[1] === '2') {
+            const claims = await prisma.claim.findMany({
+              where: { relativeId: user.relative!.id },
+              include: { mortality: true },
+              orderBy: { pickUpDate: 'desc' },
+            });
+            if (claims.length > 0) {
+              response = 'END Your claim history:\n';
+              claims.forEach((claim, index) => {
+                const formattedDate = claim.pickUpDate.toLocaleDateString('en-GB', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                });
+                response += `${index + 1}. ${claim.mortality.firstName} ${claim.mortality.lastName} - ${claim.amount} RWF - ${formattedDate}\n`;
+              });
+            } else {
+              response = 'END You have no claim history.';
+            }
+          }
+          break;
+
+        case 3:
+          if (textArray[1] === '1') {
+            response = 'CON Please enter the National ID of the deceased:';
+          }
+          break;
+        case 4:
+          if (textArray[1] === '1') {
+            const nid = textArray[3];
+            const mortality = await prisma.mortality.findFirst({
+              where: { nid },
+            });
+            if (mortality && mortality.status === MortalityStatusEnum.UNCLAIMED) {
+              const currentDate = new Date();
+              const registeredDate = new Date(mortality.registeredOn);
+              const daysPassed = Math.ceil((currentDate.getTime() - registeredDate.getTime()) / (1000 * 60 * 60 * 24));
+              const totalCost = daysPassed * COST_PER_DAY;
+              response = `CON Deceased found: ${mortality.firstName} ${mortality.lastName}\n`;
+              response += `Total cost: ${totalCost} RWF\n`;
+              response += 'Enter your relationship to the deceased:';
+            }
+            else if (mortality) {
+              response = 'END Deceased found with that National ID but is already claimed.';
+            }
+            else {
+              response = 'END No unclaimed deceased found with that National ID.';
+            }
+          }
+          break;
+
+        case 5:
+          if (textArray[1] === '1') {
+            response = 'CON Enter your MOMO number:';
+          }
+          break;
+
+        case 6:
+          if (textArray[1] === '1') {
+            response = 'CON Enter pickup date (YYYY-MM-DD):';
+          }
+          break;
+
+        case 7:
+          if (textArray[1] === '1') {
+            response = 'CON Enter pickup time (HH:MM, 24-hour format):';
+          }
+          break;
+
+        case 8:
+          if (textArray[1] === '1') {
+            const nid = textArray[3];
+            const relationship = textArray[4];
+            const method = textArray[5];
+            const pickUpDate = textArray[6];
+            const pickUpTime = textArray[7];
+            const pickUpDateTime = new Date(`${pickUpDate}T${pickUpTime}:00`);
+            if (isNaN(pickUpDateTime.getTime())) {
+              response = 'END Invalid date or time format. Please start over and use the correct format.';
+            }
+            else {
+
+              const mortality = await prisma.mortality.findFirst({
+                where: { nid, status: 'UNCLAIMED' },
+              });
+              if (mortality) {
+                const currentDate = new Date();
+                const registeredDate = new Date(mortality.registeredOn);
+                const daysPassed = Math.ceil((currentDate.getTime() - registeredDate.getTime()) / (1000 * 60 * 60 * 24));
+                const totalCost = daysPassed * COST_PER_DAY;
+                await prisma.claim.create({
+                  data: {
+                    relativeId: user.relative!.id,
+                    mortalityId: mortality.id,
+                    relationship,
+                    amount: totalCost,
+                    method,
+                    paidAt: new Date(),
+                    pickUpDate: pickUpDateTime,
+                  },
+                });
+                await prisma.mortality.update({
+                  where: { id: mortality.id },
+                  data: { status: 'CLAIMED' },
+                });
+                response = `END Your claim has been submitted successfully. Total cost: ${totalCost} RWF. Be ready at pickup date.`;
+              } else {
+                response = 'END An error occurred. Please try again later.';
+              }
+            }
+          }
+          break;
+
+        default:
+          response = 'END Invalid input. Please try again.';
       }
     }
-  } catch (error) {
-    response = `Error processing request: ${error.message}`;
-    continueSession = 0;
+
+    return new NextResponse(response);
   }
-
-  res.json({
-    sessionId: sessionId,
-    message: response,
-    ContinueSession: continueSession
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+  catch (error: any) {
+    return new NextResponse(`Morgue MIS Error: ${error.message}`);
+  }
+}
