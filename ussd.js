@@ -85,7 +85,7 @@ app.post('/', async (req, res) => {
   let continueSession = 1;
 
   try {
-    if (userInput === '*662*800*100#' || level === 0) {
+    if (userInput === '**384*5158#' || level === 0) {
       response = 'Welcome to XYZ Cleaning Company\n' +
                  '1. Register\n' +
                  '2. Book Appointment\n' +
